@@ -80,6 +80,35 @@
         </el-col>
       </el-row>
     </el-tab-pane>
+
+    <el-tab-pane label="系统备份" name="backups">
+      <el-card>
+        <template #header>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div style="font-weight:600">备份管理（管理员）</div>
+            <div style="display:flex;gap:8px">
+              <el-button type="primary" @click="createBackup">立即备份</el-button>
+              <el-button @click="loadBackups">刷新</el-button>
+            </div>
+          </div>
+        </template>
+        
+        <el-table :data="backups" style="width: 100%">
+          <el-table-column prop="name" label="文件名" />
+          <el-table-column prop="size" label="大小" width="120">
+            <template #default="scope">{{ fmtBytes(scope.row.size) }}</template>
+          </el-table-column>
+          <el-table-column prop="created_at" label="创建时间" width="180">
+            <template #default="scope">{{ fmtTime(scope.row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="120">
+            <template #default="scope">
+              <el-button size="small" type="warning" @click="restoreBackup(scope.row)">恢复</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+    </el-tab-pane>
   </el-tabs>
 
   <el-dialog v-model="dialogOpen" :title="dialogMode === 'create' ? '新增用户' : '编辑用户'" width="520">
@@ -135,12 +164,13 @@ type User = {
 }
 
 const router = useRouter()
-const activeTab = ref<'me' | 'users'>('me')
+const activeTab = ref<'me' | 'users' | 'backups'>('me')
 
 const me = ref<Me | null>(null)
 
 const users = ref<User[]>([])
 const selected = ref<User | null>(null)
+const backups = ref<any[]>([])
 
 const dialogOpen = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
@@ -254,10 +284,63 @@ function logout() {
   router.push('/login')
 }
 
+function fmtBytes(n: number) {
+  if (!n || n <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = n
+  let idx = 0
+  while (v >= 1024 && idx < units.length - 1) {
+    v /= 1024
+    idx += 1
+  }
+  const s = idx === 0 ? String(Math.round(v)) : v.toFixed(v >= 10 ? 1 : 2)
+  return `${s} ${units[idx]}`
+}
+
+function fmtTime(v: string) {
+  if (!v) return ''
+  return v.replace('T', ' ').slice(0, 19)
+}
+
+async function loadBackups() {
+  try {
+    const resp = await api.get('/backups/')
+    backups.value = resp.data
+  } catch {
+    backups.value = []
+  }
+}
+
+async function createBackup() {
+  try {
+    await api.post('/backups/create/')
+    ElMessage.success('备份已创建')
+    await loadBackups()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '备份失败')
+  }
+}
+
+async function restoreBackup(row: any) {
+  try {
+    await ElMessageBox.confirm(`确定从备份 ${row.name} 恢复吗？这将覆盖当前数据！`, '恢复备份', {
+      confirmButtonText: '恢复',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await api.post('/backups/restore/', { filename: row.name })
+    ElMessage.success('恢复成功')
+  } catch (e: any) {
+    if (e?.name === 'CanceledError' || e === 'cancel' || e === 'cancelled') return
+    ElMessage.error(e?.response?.data?.detail || '恢复失败')
+  }
+}
+
 watch(
   () => activeTab.value,
   (v) => {
     if (v === 'users') loadUsers()
+    if (v === 'backups') loadBackups()
   }
 )
 

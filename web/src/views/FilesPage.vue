@@ -51,6 +51,18 @@
         <el-header height="84px" style="background:var(--el-bg-color);border-bottom:1px solid var(--el-border-color);padding:10px 12px">
           <!-- 快捷操作栏（回收站在这一栏） -->
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <el-input
+              v-model="searchText"
+              placeholder="搜索文件/内容"
+              style="width: 200px"
+              clearable
+              @keyup.enter="doSearch"
+              @clear="doSearch"
+            >
+              <template #append>
+                <el-button @click="doSearch">搜</el-button>
+              </template>
+            </el-input>
             <el-upload :show-file-list="false" :disabled="viewMode !== 'files'" :http-request="doUpload">
               <el-button :disabled="viewMode !== 'files'">上传</el-button>
             </el-upload>
@@ -99,6 +111,7 @@
                 >
                   <el-table-column type="selection" width="44" />
                   <el-table-column prop="name" label="名称" min-width="240" />
+                  <el-table-column v-if="viewMode === 'recycle'" prop="original_path" label="原路径" width="180" />
                   <el-table-column prop="type" label="类型" width="90" />
                   <el-table-column prop="modified" label="修改时间" width="170" />
                   <el-table-column prop="size" label="大小" width="90" />
@@ -143,6 +156,7 @@
                     <template v-if="viewMode !== 'recycle'">
                       <el-button :disabled="!canRenameMove" @click="renameFocused">重命名</el-button>
                       <el-button :disabled="!canRenameMove" @click="moveFocused">移动</el-button>
+                      <el-button :disabled="focused.type === '文件夹'" @click="openVersions(focused)">历史版本</el-button>
                       <el-switch
                         v-model="focusedPersonalSwitch"
                         active-text="设为个人区"
@@ -167,6 +181,21 @@
       </el-container>
     </el-container>
   </el-card>
+
+  <el-dialog v-model="versionsOpen" title="历史版本" width="640px">
+    <el-table :data="versionsList" height="400">
+      <el-table-column prop="version_number" label="版本号" width="80" />
+      <el-table-column prop="size_bytes" label="大小" width="100">
+        <template #default="scope">{{ fmtBytes(scope.row.size_bytes) }}</template>
+      </el-table-column>
+      <el-table-column prop="created_at" label="上传时间" width="180">
+        <template #default="scope">{{ fmtTime(scope.row.created_at) }}</template>
+      </el-table-column>
+      <el-table-column prop="created_by" label="上传人">
+        <template #default="scope">{{ scope.row.created_by?.display_name || scope.row.created_by?.username || '-' }}</template>
+      </el-table-column>
+    </el-table>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -191,6 +220,7 @@ type Row = {
   deleted_at?: string | null
   is_personal: boolean
   owner_user: number | null
+  original_path?: string
 }
 
 type DirNode = { id: number; name: string; parent: number | null }
@@ -209,6 +239,7 @@ const projectPick = ref('')
 const activeProjectId = ref('')
 
 const viewMode = ref<'files' | 'recycle'>('files')
+const searchText = ref('')
 
 const includePersonal = ref(false)
 
@@ -224,6 +255,8 @@ const selectedKeys = ref<string[]>([])
 const selectedRows = ref<Row[]>([])
 
 const listRows = ref<Row[]>([])
+const versionsOpen = ref(false)
+const versionsList = ref<any[]>([])
 
 const breadcrumb = computed(() => {
   const projectSeg = projects.value.find((p) => String(p.id) === activeProjectId.value)
@@ -295,6 +328,7 @@ function syncRoute() {
   }
   if (viewMode.value === 'files') query.folder = currentFolderKey.value
   if (includePersonal.value) query.include_personal = '1'
+  if (searchText.value) query.q = searchText.value
   router.replace({ path: '/files', query })
 }
 
@@ -326,6 +360,7 @@ function enterProject() {
 
 function onProjectChange() {
   currentFolderKey.value = 'root'
+  searchText.value = ''
   syncRoute()
   focused.value = null
   selectedKeys.value = []
@@ -344,6 +379,7 @@ function onTreeClick(node: TreeNode) {
 
 function toggleRecycle() {
   viewMode.value = viewMode.value === 'recycle' ? 'files' : 'recycle'
+  searchText.value = ''
   syncRoute()
   focused.value = null
   selectedKeys.value = []
@@ -494,6 +530,13 @@ async function doUpload(opts: UploadRequestOptions) {
     if (currentFolderKey.value !== 'root') fd.append('parent', currentFolderKey.value)
     fd.append('file', opts.file)
 
+    // 如果是覆盖更新（选中了文件且只选中了一个）
+    // 但这里是通用上传按钮，通常是新增。
+    // 若要支持覆盖更新，需要在详情面板提供“上传新版本”按钮，或者检测同名。
+    // 目前后端 upload 接口是新建，若同名会报错。
+    // 我们在详情面板加一个“更新内容”按钮比较好。
+    // 这里保持原样：新增文件。
+
     await api.post('/files/upload/', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     ElMessage.success('上传成功')
     opts.onSuccess?.({ ok: true })
@@ -502,6 +545,57 @@ async function doUpload(opts: UploadRequestOptions) {
   } catch (e: any) {
     opts.onError?.(e)
     ElMessage.error(e?.response?.data?.detail || '上传失败（需要项目管理员或系统管理员权限）')
+  }
+}
+
+async function openVersions(row: Row) {
+  if (!row?.id) return
+  try {
+    const resp = await api.get(`/files/${row.id}/versions/`)
+    versionsList.value = resp.data
+    versionsOpen.value = true
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '获取版本失败')
+  }
+}
+
+async function doSearch() {
+  if (!activeProjectId.value) return
+  if (!searchText.value.trim()) {
+    // 清空搜索，回到当前目录
+    await loadList()
+    return
+  }
+  
+  // 搜索模式下，不依赖 currentFolderKey，而是全项目搜索
+  // 但为了保持 UI 状态，我们不改变 currentFolderKey，只是列表展示搜索结果
+  // 并且面包屑可能需要提示“搜索结果”
+  
+  try {
+    const resp = await api.get('/files/search/', {
+      params: {
+        project: activeProjectId.value,
+        q: searchText.value,
+        include_personal: includePersonal.value ? '1' : '0'
+      }
+    })
+    const items = resp.data as any[]
+    listRows.value = items.map((x) => ({
+      key: String(x.id),
+      id: x.id,
+      name: x.name,
+      type: x.is_dir ? '文件夹' : '文件',
+      modified: fmtTime(x.updated_at),
+      size: x.is_dir ? '-' : fmtBytes(x.size_bytes || 0),
+      parent: x.parent ?? null,
+      is_dir: !!x.is_dir,
+      deleted_at: x.deleted_at,
+      is_personal: !!x.is_personal,
+      owner_user: x.owner_user ?? null
+    }))
+    syncRoute()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '搜索失败')
   }
 }
 
@@ -706,8 +800,14 @@ async function loadList() {
       is_dir: !!x.is_dir,
       deleted_at: x.deleted_at,
       is_personal: !!x.is_personal,
-      owner_user: x.owner_user ?? null
+      owner_user: x.owner_user ?? null,
+      original_path: x.original_path || ''
     }))
+    return
+  }
+
+  if (searchText.value.trim()) {
+    await doSearch()
     return
   }
 
@@ -777,6 +877,7 @@ onMounted(async () => {
   if (qv === 'recycle') viewMode.value = 'recycle'
   if (qf) currentFolderKey.value = qf
   if (qip === '1') includePersonal.value = true
+  if (typeof route.query.q === 'string') searchText.value = route.query.q
 
   if (activeProjectId.value) {
     await loadTree()
