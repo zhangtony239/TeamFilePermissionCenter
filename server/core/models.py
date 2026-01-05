@@ -187,6 +187,9 @@ class FileEntry(models.Model):
         related_name="owned_file_entries",
     )
 
+    version_number = models.PositiveIntegerField(default=1)
+    search_text = models.TextField(blank=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["project", "parent", "is_dir"], name="core_fileen_project_f25027_idx"),
@@ -196,6 +199,28 @@ class FileEntry(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class FileVersion(models.Model):
+    file_entry = models.ForeignKey(FileEntry, on_delete=models.CASCADE, related_name="versions")
+    version_number = models.PositiveIntegerField()
+
+    size_bytes = models.BigIntegerField()
+    mime_type = models.CharField(max_length=128, blank=True)
+    storage_key = models.CharField(max_length=512)
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_file_versions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("file_entry", "version_number")
+        ordering = ["-version_number"]
 
 
 class FileACL(models.Model):

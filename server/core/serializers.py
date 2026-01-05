@@ -3,7 +3,7 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import AuditLog, FileACL, FileEntry, Project, ProjectAward, ProjectEvent, ProjectMembership, ProjectTask, RecycleBinItem
+from .models import AuditLog, FileACL, FileEntry, FileVersion, Project, ProjectAward, ProjectEvent, ProjectMembership, ProjectTask, RecycleBinItem
 
 User = get_user_model()
 
@@ -183,6 +183,7 @@ class RecycleBinItemSerializer(serializers.ModelSerializer):
 
 class FileEntrySerializer(serializers.ModelSerializer):
     owner_user = serializers.IntegerField(source="owner_user_id", read_only=True)
+    original_path = serializers.SerializerMethodField()
 
     class Meta:
         model = FileEntry
@@ -200,7 +201,25 @@ class FileEntrySerializer(serializers.ModelSerializer):
             "deleted_at",
             "is_personal",
             "owner_user",
+            "original_path",
         ]
+
+    def get_original_path(self, obj) -> str:
+        # 仅对回收站条目计算原路径，避免普通列表 N+1 性能损耗
+        if obj.deleted_at is None:
+            return ""
+        
+        path_parts = []
+        curr = obj.parent
+        # 限制最大深度防止死循环
+        depth = 0
+        while curr and depth < 20:
+            path_parts.append(curr.name)
+            curr = curr.parent
+            depth += 1
+        
+        # 结果如 "/docs/specs/"
+        return "/" + "/".join(reversed(path_parts)) + ("/" if path_parts else "")
         read_only_fields = ["id", "created_at", "updated_at", "deleted_at"]
 
 
@@ -230,3 +249,19 @@ class FileACLSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "created_by", "created_at"]
+
+
+class FileVersionSerializer(serializers.ModelSerializer):
+    created_by = UserBriefSerializer(read_only=True)
+
+    class Meta:
+        model = FileVersion
+        fields = [
+            "id",
+            "file_entry",
+            "version_number",
+            "size_bytes",
+            "mime_type",
+            "created_by",
+            "created_at",
+        ]

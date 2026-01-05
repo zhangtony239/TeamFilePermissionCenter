@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
+import os
+import pypdf
 from datetime import date, datetime
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Q
@@ -13,7 +17,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import AuditLog, FileACL, FileEntry, Project, ProjectAward, ProjectEvent, ProjectMembership, ProjectTask, RecycleBinItem
+from .models import AuditLog, FileACL, FileEntry, FileVersion, Project, ProjectAward, ProjectEvent, ProjectMembership, ProjectTask, RecycleBinItem
 from .permissions import IsProjectAdminOrSystemAdmin, IsProjectMemberOrAdmin, IsSystemAdmin
 from .storage import presigned_download_url, presigned_preview_url, put_object
 from .serializers import (
@@ -27,6 +31,7 @@ from .serializers import (
     FileDirNodeSerializer,
     FileEntrySerializer,
     FileACLSerializer,
+    FileVersionSerializer,
     UserAdminSerializer,
     UserBriefSerializer,
 )
@@ -779,14 +784,18 @@ class FileEntryViewSet(viewsets.GenericViewSet):
             content_type=getattr(up, "content_type", None),
         )
 
+        mime_type = (getattr(up, "content_type", "") or "")[:128]
+        search_text = self._extract_text(up.file, mime_type)
+
         entry = FileEntry.objects.create(
             project_id=project_id,
             parent_id=parent_id,
             name=filename,
             is_dir=False,
             size_bytes=int(getattr(up, "size", 0) or 0),
-            mime_type=(getattr(up, "content_type", "") or "")[:128],
+            mime_type=mime_type,
             storage_key=storage_key,
+            search_text=search_text,
             created_by=request.user,
             updated_by=request.user,
         )
@@ -1167,6 +1176,141 @@ class FileEntryViewSet(viewsets.GenericViewSet):
         write_audit(request=request, action="FILE_PURGE", project=project, path=str(entry_id))
         return Response({"ok": True})
 
+    def _extract_text(self, file_obj, mime_type: str) -> str:
+        try:
+            text = ""
+            if not mime_type:
+                return ""
+            if "pdf" in mime_type:
+                try:
+                    reader = pypdf.PdfReader(file_obj)
+                    for page in reader.pages:
+                        t = page.extract_text()
+                        if t:
+                            text += t + "\n"
+                except Exception:
+                    pass
+            elif "text" in mime_type or "json" in mime_type or "xml" in mime_type or "javascript" in mime_type or "markdown" in mime_type:
+                file_obj.seek(0)
+                content = file_obj.read()
+                try:
+                    text = content.decode("utf-8")
+                except Exception:
+                    pass
+            return text[:100000]
+        except Exception:
+            return ""
+        finally:
+            file_obj.seek(0)
+
+    @action(detail=True, methods=["post"], url_path="update-content")
+    def update_content(self, request, pk=None):
+        entry = self.get_object()
+        _require_project_member(request, project_id=entry.project_id)
+        
+        if entry.is_dir:
+            return Response({"detail": "目录不支持更新内容"}, status=status.HTTP_400_BAD_REQUEST)
+        if entry.deleted_at is not None:
+            return Response({"detail": "回收站文件不支持更新"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        self._require_acl(request=request, entry=entry, action=FileACL.Action.UPDATE)
+        
+        up = request.FILES.get("file")
+        if not up:
+            return Response({"detail": "file 参数必填"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Save current version
+        FileVersion.objects.create(
+            file_entry=entry,
+            version_number=entry.version_number,
+            size_bytes=entry.size_bytes,
+            mime_type=entry.mime_type,
+            storage_key=entry.storage_key,
+            created_by=entry.updated_by,
+        )
+        
+        # Upload new
+        import uuid
+        object_name = f"p{entry.project_id}/{uuid.uuid4().hex}/{entry.name}"
+        storage_key = put_object(
+            object_name=object_name,
+            data=up.file,
+            length=int(getattr(up, "size", 0) or 0),
+            content_type=getattr(up, "content_type", None),
+        )
+        
+        mime_type = (getattr(up, "content_type", "") or "")[:128]
+        search_text = self._extract_text(up.file, mime_type)
+
+        entry.storage_key = storage_key
+        entry.size_bytes = int(getattr(up, "size", 0) or 0)
+        entry.mime_type = mime_type
+        entry.search_text = search_text
+        entry.version_number += 1
+        entry.updated_by = request.user
+        entry.save(update_fields=["storage_key", "size_bytes", "mime_type", "search_text", "version_number", "updated_by", "updated_at"])
+        
+        write_audit(request=request, action="FILE_UPDATE_CONTENT", project=entry.project, path=str(entry.id))
+        return Response(FileEntrySerializer(entry).data)
+
+    @action(detail=False, methods=["get"], url_path="search")
+    def search(self, request):
+        project_id = request.query_params.get("project")
+        q = request.query_params.get("q", "").strip()
+        
+        if not project_id or not q:
+            return Response({"detail": "project 和 q 参数必填"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        _require_project_member(request, project_id=int(project_id))
+        
+        qs = FileEntry.objects.filter(
+            project_id=int(project_id),
+            deleted_at__isnull=True
+        ).filter(
+            Q(name__icontains=q) | Q(search_text__icontains=q)
+        ).order_by("-updated_at")
+        
+        qs = self._apply_personal_filter(qs=qs, request=request, project_id=int(project_id), include_personal=True)
+        
+        items = list(qs[:50])
+        if not items:
+            return Response([])
+            
+        if request.user.is_staff or self._is_project_admin(request=request, project_id=int(project_id)):
+            return Response(FileEntrySerializer(items, many=True).data)
+            
+        role = self._get_member_role(request=request, project_id=int(project_id))
+        target_ids = [x.id for x in items]
+        acls_by_target = self._load_subject_acls(
+            project_id=int(project_id),
+            role=role,
+            user_id=request.user.id,
+            target_ids=target_ids,
+        )
+        
+        allowed = []
+        for it in items:
+            chain = self._get_ancestor_ids(entry=it)
+            chain.append(it.id)
+            if self._eval_acl(
+                action=FileACL.Action.LIST,
+                target_id=it.id,
+                chain_ids=chain,
+                acls_by_target=acls_by_target,
+            ):
+                allowed.append(it)
+                
+        return Response(FileEntrySerializer(allowed, many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="versions")
+    def versions(self, request, pk=None):
+        entry = self.get_object()
+        _require_project_member(request, project_id=entry.project_id)
+        self._require_acl(request=request, entry=entry, action=FileACL.Action.LIST)
+        
+        qs = entry.versions.select_related("created_by").order_by("-version_number")
+        return Response(FileVersionSerializer(qs, many=True).data)
+
 
 class ProjectEventViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectEventSerializer
@@ -1364,3 +1508,53 @@ class RecycleBinViewSet(viewsets.ReadOnlyModelViewSet):
         item.delete()
         write_audit(request=request, action="RECYCLE_PURGE", project=None, path=str(pk))
         return Response(status=204)
+
+
+class BackupViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated, IsSystemAdmin]
+
+    def list(self, request):
+        backup_dir = os.path.join(settings.BASE_DIR, "backups")
+        if not os.path.exists(backup_dir):
+            return Response([])
+            
+        files = []
+        for f in os.listdir(backup_dir):
+            if f.endswith(".json"):
+                path = os.path.join(backup_dir, f)
+                stat = os.stat(path)
+                files.append({
+                    "name": f,
+                    "size": stat.st_size,
+                    "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                })
+        files.sort(key=lambda x: x["name"], reverse=True)
+        return Response(files)
+
+    @action(detail=False, methods=["post"], url_path="create")
+    def create_backup(self, request):
+        from django.core.management import call_command
+        try:
+            call_command("backup_system")
+            return Response({"ok": True})
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=["post"], url_path="restore")
+    def restore(self, request):
+        filename = request.data.get("filename")
+        if not filename:
+            return Response({"detail": "filename 参数必填"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        backup_dir = os.path.join(settings.BASE_DIR, "backups")
+        filepath = os.path.join(backup_dir, filename)
+        
+        if not os.path.exists(filepath):
+            return Response({"detail": "备份文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+            
+        from django.core.management import call_command
+        try:
+            call_command("loaddata", filepath)
+            return Response({"ok": True})
+        except Exception as e:
+            return Response({"detail": f"恢复失败: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

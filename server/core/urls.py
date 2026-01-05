@@ -5,6 +5,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import (
     AuditLogViewSet,
     AuthViewSet,
+    BackupViewSet,
     FileEntryViewSet,
     ProjectAwardViewSet,
     ProjectEventViewSet,
@@ -26,6 +27,7 @@ router.register(r"users", UserAdminViewSet, basename="users")
 router.register(r"audit", AuditLogViewSet, basename="audit")
 router.register(r"recycle", RecycleBinViewSet, basename="recycle")
 router.register(r"files", FileEntryViewSet, basename="files")
+router.register(r"backups", BackupViewSet, basename="backups")
 
 urlpatterns = [
     path("auth/login/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
