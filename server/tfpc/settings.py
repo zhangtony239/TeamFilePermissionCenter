@@ -115,7 +115,8 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "")
 # MINIO_PUBLIC_ENDPOINT：生成给浏览器的预签名 URL 用的地址。
 # 该地址参与签名，必须与浏览器最终访问 MinIO 的地址一致。
 # 在 docker-compose 方案中，MinIO 不直接对外暴露，
-# 由 nginx 在 5173 端口反代 /minio/ 路径，故此处应设为 127.0.0.1:5173。
+# 由 nginx 在 5173 端口反代 /<bucket>/ 路径（默认桶名 tfpc，即 /tfpc/），
+# 故此处应设为 127.0.0.1:5173。
 # 若留空则回退到 MINIO_ENDPOINT（适用于 MinIO 直接对外的旧方案）。
 MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
