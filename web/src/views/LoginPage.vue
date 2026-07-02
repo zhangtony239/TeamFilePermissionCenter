@@ -37,8 +37,11 @@ async function doLogin() {
   try {
     const resp = await api.post('/auth/login/', { username: username.value, password: password.value })
     const token = resp.data?.access
+    const refresh = resp.data?.refresh
     if (!token) throw new Error('no token')
     localStorage.setItem('tfpc_token', token)
+    // 同时保存 refresh token，供 access 过期时自动刷新
+    if (refresh) localStorage.setItem('tfpc_refresh', refresh)
     router.push('/projects')
   } catch {
     ElMessage.error('登录失败')

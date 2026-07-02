@@ -37,6 +37,10 @@ export const router = createRouter({
 router.beforeEach((to) => {
   if (to.path === '/login') return true
   const token = localStorage.getItem('tfpc_token')
-  if (!token) return '/login'
+  if (!token) {
+    // 无 access token，连同可能失效的 refresh 一并清理
+    localStorage.removeItem('tfpc_refresh')
+    return '/login'
+  }
   return true
 })
