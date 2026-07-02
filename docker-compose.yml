@@ -1,0 +1,110 @@
+# TFPC docker-compose 部署
+# 组件间通过容器名直连，对外仅暴露 127.0.0.1:5173（nginx 统一入口）
+#
+# 依赖根目录 .env 文件提供配置（由 .env.docker.example 复制而来）。
+# 启动：docker compose up -d --build
+
+services:
+  # ============================================================
+  # MinIO（S3 兼容对象存储）
+  # 容器名 minio；server/web 通过 minio:9000 直连，不对外暴露
+  # ============================================================
+  minio:
+    image: minio/minio:latest
+    container_name: tfpc-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - minio-data:/data
+    # 仅容器内访问；web 经 minio:9000 反代
+    expose:
+      - "9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - tfpc-net
+
+  # ============================================================
+  # 后端（Django + Gunicorn）
+  # 容器名 server；web 通过 server:8000 反代，不对外暴露
+  # ============================================================
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: tfpc-server:latest
+    container_name: tfpc-server
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY must be set}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://127.0.0.1:5173}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://127.0.0.1:5173}
+      # MinIO：内部直连用容器名，对外预签名用 127.0.0.1:5173（经 nginx 反代）
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-127.0.0.1:5173}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-tfpc}
+      MINIO_SECURE: ${MINIO_SECURE:-0}
+      # SQLite 持久化路径
+      DB_NAME: ${DB_NAME:-/app/data/db.sqlite3}
+      # 可选：首次启动自动创建超级管理员
+      DJANGO_SUPERUSER_USERNAME: ${DJANGO_SUPERUSER_USERNAME:-}
+      DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
+      DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-}
+    volumes:
+      - django-static:/app/staticfiles
+      - tfpc-db:/app/data
+      - tfpc-backups:/app/backups
+    expose:
+      - "8000"
+    networks:
+      - tfpc-net
+
+  # ============================================================
+  # 前端（nginx 静态托管 + 反向代理，唯一对外入口）
+  # 反代 /api/ /admin/ -> server:8000；/static/ -> 共享卷；/tfpc/ -> minio:9000
+  # ============================================================
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # 前端与后端同源（均经 5173），浏览器请求 /api/v1/ 由 nginx 反代
+        VITE_API_BASE: ${VITE_API_BASE:-/api/v1}
+    image: tfpc-web:latest
+    container_name: tfpc-web
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_started
+    ports:
+      # 仅绑定 127.0.0.1：不对外网开放，本机浏览器访问 http://127.0.0.1:5173
+      - "127.0.0.1:5173:5173"
+    volumes:
+      # 只读挂载 server 的 collectstatic 产物，供 /static/ 直接提供
+      - django-static:/srv/django-static:ro
+    networks:
+      - tfpc-net
+
+volumes:
+  minio-data:
+  django-static:
+  tfpc-db:
+  tfpc-backups:
+
+networks:
+  tfpc-net:
+    driver: bridge

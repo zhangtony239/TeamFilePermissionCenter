@@ -82,6 +82,8 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# collectstatic 输出目录，供 Django Admin 等静态资源在容器内集中托管
+STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "core.User"
@@ -93,6 +95,11 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 
+# CSRF 可信来源（Django Admin 等表单提交）；docker-compose 同源方案默认 127.0.0.1:5173
+CSRF_TRUSTED_ORIGINS = [
+    o for o in os.getenv("CSRF_TRUSTED_ORIGINS", "http://127.0.0.1:5173").split(",") if o
+]
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -103,8 +110,14 @@ REST_FRAMEWORK = {
 }
 
 # MinIO / S3 storage
+# MINIO_ENDPOINT：服务端内部访问 MinIO 的地址（容器间直连，如 minio:9000）
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "")
-MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "")  # 可选：给浏览器访问的地址（用于 presigned URL）
+# MINIO_PUBLIC_ENDPOINT：生成给浏览器的预签名 URL 用的地址。
+# 该地址参与签名，必须与浏览器最终访问 MinIO 的地址一致。
+# 在 docker-compose 方案中，MinIO 不直接对外暴露，
+# 由 nginx 在 5173 端口反代 /minio/ 路径，故此处应设为 127.0.0.1:5173。
+# 若留空则回退到 MINIO_ENDPOINT（适用于 MinIO 直接对外的旧方案）。
+MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "tfpc")

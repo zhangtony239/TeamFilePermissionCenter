@@ -4,7 +4,12 @@ __pycache__/
 *$py.class
 venv/
 .env
+.env.local
 *.sqlite3
+db.sqlite3
+server/staticfiles/
+server/backups/
+server/data/
 
 # Node
 node_modules/
